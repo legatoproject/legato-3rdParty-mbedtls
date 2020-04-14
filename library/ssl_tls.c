@@ -69,6 +69,7 @@
 #endif
 
 #include "mbedtls/debug.h"
+#include "mbedtls/error.h"
 #include "mbedtls/ssl.h"
 #include "mbedtls/ssl_internal.h"
 #include "mbedtls/platform_util.h"
@@ -759,10 +760,37 @@ int mbedtls_ssl_derive_keys( mbedtls_ssl_context *ssl )
 
             MBEDTLS_SSL_DEBUG_BUF( 3, "session hash", session_hash, hash_len );
 
-            ret = handshake->tls_prf( handshake->premaster, handshake->pmslen,
-                                      "extended master secret",
-                                      session_hash, hash_len,
-                                      session->master, 48 );
+#if defined(MBEDTLS_IOT_KEY_STORE_ENABLED)
+            if (ssl->conf->psk_iks_ref != NULL)
+            {
+                iks_KeyRef_t keyRef = ssl->conf->psk_iks_ref;
+
+                // Extract the "other secret" from the calculated premaster secret by trimming off
+                // the dummy psk (include the psk size).
+                // Calculate the master secret using the PSK referenced by keyRef.
+                if (iks_tls_1_2DerivePskMasterSecret(keyRef,
+                                                    handshake->premaster,
+                                                    (handshake->pmslen - ssl->conf->psk_len - 2),
+                                                    "extended master secret",
+                                                    session_hash, hash_len,
+                                                    session->master) != IKS_OK)
+                {
+                    ret = MBEDTLS_ERR_SSL_HW_ACCEL_FAILED;
+                }
+                else
+                {
+                    ret = 0;
+                }
+            }
+            else
+#endif  /* MBEDTLS_IOT_KEY_STORE_ENABLED */
+            {
+                ret = handshake->tls_prf( handshake->premaster, handshake->pmslen,
+                                        "extended master secret",
+                                        session_hash, hash_len,
+                                        session->master, 48 );
+            }
+
             if( ret != 0 )
             {
                 MBEDTLS_SSL_DEBUG_RET( 1, "prf", ret );
@@ -772,10 +800,39 @@ int mbedtls_ssl_derive_keys( mbedtls_ssl_context *ssl )
         }
         else
 #endif
-        ret = handshake->tls_prf( handshake->premaster, handshake->pmslen,
-                                  "master secret",
-                                  handshake->randbytes, 64,
-                                  session->master, 48 );
+        {
+#if defined(MBEDTLS_IOT_KEY_STORE_ENABLED)
+            if (ssl->conf->psk_iks_ref != NULL)
+            {
+                iks_KeyRef_t keyRef = ssl->conf->psk_iks_ref;
+
+                // Extract the "other secret" from the calculated premaster secret by trimming off
+                // the dummy psk (include the psk size).
+                // Calculate the master secret using the PSK referenced by keyRef.
+                if (iks_tls_1_2DerivePskMasterSecret(keyRef,
+                                                    handshake->premaster,
+                                                    (handshake->pmslen - ssl->conf->psk_len - 2),
+                                                    "master secret",
+                                                    handshake->randbytes, 64,
+                                                    session->master) != IKS_OK)
+                {
+                    ret = MBEDTLS_ERR_SSL_HW_ACCEL_FAILED;
+                }
+                else
+                {
+                    ret = 0;
+                }
+            }
+            else
+#endif  /* MBEDTLS_IOT_KEY_STORE_ENABLED */
+            {
+                ret = handshake->tls_prf( handshake->premaster, handshake->pmslen,
+                                        "master secret",
+                                        handshake->randbytes, 64,
+                                        session->master, 48 );
+            }
+        }
+
         if( ret != 0 )
         {
             MBEDTLS_SSL_DEBUG_RET( 1, "prf", ret );
@@ -7488,6 +7545,152 @@ int mbedtls_ssl_conf_psk( mbedtls_ssl_config *conf,
     return( 0 );
 }
 
+#if defined(MBEDTLS_IOT_KEY_STORE_ENABLED)
+static void ssl_conf_remove_psk( mbedtls_ssl_config *conf )
+{
+    /* Remove reference to existing PSK, if any. */
+#if defined(MBEDTLS_USE_PSA_CRYPTO)
+    if( conf->psk_opaque != 0 )
+    {
+        /* The maintenance of the PSK key slot is the
+         * user's responsibility. */
+        conf->psk_opaque = 0;
+    }
+    /* This and the following branch should never
+     * be taken simultaenously as we maintain the
+     * invariant that raw and opaque PSKs are never
+     * configured simultaneously. As a safeguard,
+     * though, `else` is omitted here. */
+#endif /* MBEDTLS_USE_PSA_CRYPTO */
+    if( conf->psk != NULL )
+    {
+        mbedtls_platform_zeroize( conf->psk, conf->psk_len );
+
+        mbedtls_free( conf->psk );
+        conf->psk = NULL;
+        conf->psk_len = 0;
+    }
+
+    /* Remove reference to PSK identity, if any. */
+    if( conf->psk_identity != NULL )
+    {
+        mbedtls_free( conf->psk_identity );
+        conf->psk_identity = NULL;
+        conf->psk_identity_len = 0;
+    }
+}
+
+/* This function assumes that PSK identity in the SSL config is unset.
+ * It checks that the provided identity is well-formed and attempts
+ * to make a copy of it in the SSL config.
+ * On failure, the PSK identity in the config remains unset. */
+static int ssl_conf_set_psk_identity( mbedtls_ssl_config *conf,
+                                      unsigned char const *psk_identity,
+                                      size_t psk_identity_len )
+{
+    /* Identity len will be encoded on two bytes */
+    if( psk_identity               == NULL ||
+        ( psk_identity_len >> 16 ) != 0    ||
+        psk_identity_len > MBEDTLS_SSL_OUT_CONTENT_LEN )
+    {
+        return( MBEDTLS_ERR_SSL_BAD_INPUT_DATA );
+    }
+
+    conf->psk_identity = mbedtls_calloc( 1, psk_identity_len );
+    if( conf->psk_identity == NULL )
+        return( MBEDTLS_ERR_SSL_ALLOC_FAILED );
+
+    conf->psk_identity_len = psk_identity_len;
+    memcpy( conf->psk_identity, psk_identity, conf->psk_identity_len );
+
+    return( 0 );
+}
+
+int mbedtls_ssl_conf_psk_iks( mbedtls_ssl_config *conf,
+                            const unsigned char *psk_iks_id,
+                            const unsigned char *psk_identity,
+                            size_t psk_identity_len )
+{
+    int ret = MBEDTLS_ERR_ERROR_CORRUPTION_DETECTED;
+    /* Remove opaque/raw PSK + PSK Identity */
+    ssl_conf_remove_psk( conf );
+
+    /* Get the key reference. */
+    iks_KeyRef_t keyRef = iks_GetKey((const char*)psk_iks_id);
+
+    if (keyRef == NULL)
+    {
+        return MBEDTLS_ERR_SSL_BAD_INPUT_DATA;
+    }
+
+    /* Check that the key has a value. */
+    if (iks_HasKeyValue(keyRef) != IKS_OK)
+    {
+        return MBEDTLS_ERR_SSL_BAD_INPUT_DATA;
+    }
+
+    /* Check the key type. */
+    const int *ciphersuites = conf->ciphersuite_list[MBEDTLS_SSL_MINOR_VERSION_3];
+
+    const mbedtls_ssl_ciphersuite_t *ciphersuite_info;
+    ciphersuite_info = mbedtls_ssl_ciphersuite_from_id(ciphersuites[0]);
+
+    iks_KeyType_t keyType;
+    if (iks_GetKeyType(keyRef, &keyType) != IKS_OK)
+    {
+        return MBEDTLS_ERR_ERROR_CORRUPTION_DETECTED;
+    }
+
+    switch (keyType)
+    {
+        case IKS_KEY_TYPE_TLS_1_2_PSK_SHA384:
+            if (ciphersuite_info->mac != MBEDTLS_MD_SHA384)
+            {
+                return MBEDTLS_ERR_SSL_BAD_INPUT_DATA;
+            }
+            break;
+
+        case IKS_KEY_TYPE_TLS_1_2_PSK_SHA256:
+            if (ciphersuite_info->mac != MBEDTLS_MD_SHA256)
+            {
+                return MBEDTLS_ERR_SSL_BAD_INPUT_DATA;
+            }
+            break;
+
+        default:
+            return MBEDTLS_ERR_SSL_BAD_INPUT_DATA;
+    }
+
+    /* Get the key length. */
+    size_t keySize;
+    if (iks_GetKeySize(keyRef, &keySize) != IKS_OK)
+    {
+        return MBEDTLS_ERR_SSL_BAD_INPUT_DATA;
+    }
+
+    /* Check the key length. */
+    if( keySize == 0 )
+        return( MBEDTLS_ERR_SSL_BAD_INPUT_DATA );
+    if( keySize > MBEDTLS_PSK_MAX_LEN )
+        return( MBEDTLS_ERR_SSL_BAD_INPUT_DATA );
+
+    /* Set a dummy value for the psk value. */
+    if( ( conf->psk = mbedtls_calloc( 1, keySize ) ) == NULL )
+        return( MBEDTLS_ERR_SSL_ALLOC_FAILED );
+    conf->psk_len = keySize;
+
+    /* Check and set PSK Identity */
+    ret = ssl_conf_set_psk_identity( conf, psk_identity, psk_identity_len );
+    if( ret != 0 )
+        ssl_conf_remove_psk( conf );
+
+    /* Set the IKS key reference. */
+    conf->psk_iks_ref = keyRef;
+
+    return( ret );
+}
+#endif /* MBEDTLS_IOT_KEY_STORE_ENABLED */
+
 int mbedtls_ssl_set_hs_psk( mbedtls_ssl_context *ssl,
                             const unsigned char *psk, size_t psk_len )
 {
@@ -9342,6 +9545,12 @@ void mbedtls_ssl_config_free( mbedtls_ssl_config *conf )
 #endif
 
 #if defined(MBEDTLS_KEY_EXCHANGE__SOME__PSK_ENABLED)
+#if defined(MBEDTLS_IOT_KEY_STORE_ENABLED)
+    if (conf->psk_iks_ref != NULL)
+    {
+        conf->psk_iks_ref = NULL;
+    }
+#endif
     if( conf->psk != NULL )
     {
         mbedtls_platform_zeroize( conf->psk, conf->psk_len );

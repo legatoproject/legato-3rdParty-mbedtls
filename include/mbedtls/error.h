@@ -137,6 +137,9 @@
 extern "C" {
 #endif
 
+#define MBEDTLS_ERR_ERROR_GENERIC_ERROR       -0x0001  /**< Generic error */
+#define MBEDTLS_ERR_ERROR_CORRUPTION_DETECTED -0x006E  /**< This is a bug in the library */
+
 /**
  * \brief Translate a mbed TLS error code into a string representation,
  *        Result is truncated if necessary and always includes a terminating

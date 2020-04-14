@@ -90,6 +90,10 @@
 #include "platform_time.h"
 #endif
 
+#if defined(MBEDTLS_IOT_KEY_STORE_ENABLED)
+#include "iks_keyStore.h"
+#endif
+
 /*
  * SSL Error codes
  */
@@ -952,6 +956,15 @@ struct mbedtls_ssl_config
 #endif
 
 #if defined(MBEDTLS_KEY_EXCHANGE__SOME__PSK_ENABLED)
+
+#if defined(MBEDTLS_IOT_KEY_STORE_ENABLED)
+    iks_KeyRef_t psk_iks_ref; /*!< The IOT Key Store key reference for the PSK. This
+                              *   field should only be set via mbedtls_ssl_conf_psk_iks().
+                              *   When this value is not NULL the value of psk will
+                              *   contain a dummy value and the value of psk_len will
+                              *   be the length of the PSK in the IOT Key Store. */
+#endif /* MBEDTLS_IOT_KEY_STORE_ENABLED */
+
     unsigned char *psk;             /*!< pre-shared key. This field should
                                          only be set via
                                          mbedtls_ssl_conf_psk() */
@@ -2116,6 +2129,40 @@ int mbedtls_ssl_conf_own_cert( mbedtls_ssl_config *conf,
 int mbedtls_ssl_conf_psk( mbedtls_ssl_config *conf,
                 const unsigned char *psk, size_t psk_len,
                 const unsigned char *psk_identity, size_t psk_identity_len );
+
+
+#if defined(MBEDTLS_IOT_KEY_STORE_ENABLED)
+/**
+ * \brief          Configure an IOT Key Store pre-shared key (PSK) and identity
+ *                 to be used in PSK-based ciphersuites.
+ *
+ * \note           This is mainly useful for clients.
+ *
+ * \warning        Currently, clients can only register a single pre-shared key.
+ *                 Calling this function or mbedtls_ssl_conf_psk() more than
+ *                 once will overwrite values configured in previous calls.
+ *                 Support for setting multiple PSKs on clients and selecting
+ *                 one based on the identity hint is not a planned feature,
+ *                 but feedback is welcomed.
+ *
+ * \param conf              The SSL configuration to register the PSK with.
+ * \param psk_iks_id        The IOT Key Store key identifier of the PSK.
+ * \param psk_identity      The pointer to the pre-shared key identity.
+ * \param psk_identity_len  The length of the pre-shared key identity
+ *                          in bytes.
+ *
+ * \note           The PSK identity hint is copied internally and hence need
+ *                 not be preserved by the caller for the lifetime of the
+ *                 SSL configuration.
+ *
+ * \return         \c 0 if successful.
+ * \return         An \c MBEDTLS_ERR_SSL_XXX error code on failure.
+ */
+int mbedtls_ssl_conf_psk_iks( mbedtls_ssl_config *conf,
+                                 const unsigned char *psk_iks_id,
+                                 const unsigned char *psk_identity,
+                                 size_t psk_identity_len );
+#endif /* MBEDTLS_IOT_KEY_STORE_ENABLED */
 
 
 /**

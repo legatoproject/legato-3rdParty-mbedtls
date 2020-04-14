@@ -109,6 +109,7 @@ int main( void )
 #define DFL_CRT_FILE            ""
 #define DFL_KEY_FILE            ""
 #define DFL_PSK                 ""
+#define DFL_PSK_IKS_ID          ""
 #define DFL_PSK_IDENTITY        "Client_identity"
 #define DFL_ECJPAKE_PW          NULL
 #define DFL_EC_MAX_OPS          -1
@@ -166,9 +167,24 @@ int main( void )
 #endif /* MBEDTLS_X509_CRT_PARSE_C */
 
 #if defined(MBEDTLS_KEY_EXCHANGE__SOME__PSK_ENABLED)
-#define USAGE_PSK                                                   \
+
+#define USAGE_PSK_RAW                                                   \
     "    psk=%%s              default: \"\" (in hex, without 0x)\n" \
     "    psk_identity=%%s     default: \"Client_identity\"\n"
+
+#if defined(MBEDTLS_IOT_KEY_STORE_ENABLED)
+#define USAGE_PSK_IKS                                           \
+    "    psk_iks_id=%%s       default: \"\" (disabled)\n"       \
+    "                          The key ID of the PSK in the IOT Key Store.\n"   \
+    "                          This should not be set if the psk value is also set.\n"  \
+    "                          Note: Currently only supported in conjunction with\n"    \
+    "                          the use of min_version to force TLS 1.2 and force_ciphersuite \n"    \
+    "                          to force a particular PSK ciphersuite.\n"
+#else
+#define USAGE_PSK_IKS ""
+#endif /* MBEDTLS_IOT_KEY_STORE_ENABLED */
+
+#define USAGE_PSK USAGE_PSK_RAW USAGE_PSK_IKS
 #else
 #define USAGE_PSK ""
 #endif /* MBEDTLS_KEY_EXCHANGE__SOME__PSK_ENABLED */
@@ -375,6 +391,9 @@ struct options
     const char *ca_path;        /* the path with the CA certificate(s) reside */
     const char *crt_file;       /* the file with the client certificate     */
     const char *key_file;       /* the file with the client key             */
+#if defined(MBEDTLS_IOT_KEY_STORE_ENABLED)
+    const char* psk_iks_id;
+#endif
     const char *psk;            /* the pre-shared key                       */
     const char *psk_identity;   /* the pre-shared key identity              */
     const char *ecjpake_pw;     /* the EC J-PAKE password                   */
@@ -657,6 +676,9 @@ int main( int argc, char *argv[] )
     opt.ca_path             = DFL_CA_PATH;
     opt.crt_file            = DFL_CRT_FILE;
     opt.key_file            = DFL_KEY_FILE;
+#if defined(MBEDTLS_IOT_KEY_STORE_ENABLED)
+    opt.psk_iks_id          = DFL_PSK_IKS_ID;
+#endif
     opt.psk                 = DFL_PSK;
     opt.psk_identity        = DFL_PSK_IDENTITY;
     opt.ecjpake_pw          = DFL_ECJPAKE_PW;
@@ -757,6 +779,10 @@ int main( int argc, char *argv[] )
             opt.crt_file = q;
         else if( strcmp( p, "key_file" ) == 0 )
             opt.key_file = q;
+#if defined(MBEDTLS_IOT_KEY_STORE_ENABLED)
+        else if( strcmp( p, "psk_iks_id" ) == 0 )
+            opt.psk_iks_id = q;
+#endif
         else if( strcmp( p, "psk" ) == 0 )
             opt.psk = q;
         else if( strcmp( p, "psk_identity" ) == 0 )
@@ -1102,6 +1128,21 @@ int main( int argc, char *argv[] )
 
             opt.arc4 = MBEDTLS_SSL_ARC4_ENABLED;
         }
+
+#if defined(MBEDTLS_IOT_KEY_STORE_ENABLED)
+        if( strlen(opt.psk_iks_id) != 0 )
+        {
+            /* Ensure that the chosen ciphersuite is PSK */
+            if( ciphersuite_info->key_exchange != MBEDTLS_KEY_EXCHANGE_PSK ||
+                opt.min_version != MBEDTLS_SSL_MINOR_VERSION_3 )
+            {
+                mbedtls_printf( "IOT Key Store PSKs are only supported in conjunction with forcing TLS 1.2 and a PSK ciphersuite through the 'force_ciphersuite' option.\n" );
+                ret = 2;
+                goto usage;
+            }
+        }
+#endif /* MBEDTLS_IOT_KEY_STORE_ENABLED */
+
     }
 
 #if defined(MBEDTLS_KEY_EXCHANGE__SOME__PSK_ENABLED)
@@ -1152,6 +1193,33 @@ int main( int argc, char *argv[] )
             psk[ j / 2 ] |= c;
         }
     }
+
+#if defined(MBEDTLS_IOT_KEY_STORE_ENABLED) && !defined(MBEDTLS_USE_PSA_CRYPTO)
+    if( strlen(opt.psk_iks_id) != 0 )
+    {
+        if( strlen(opt.psk_identity) == 0 )
+        {
+            mbedtls_printf( "psk_iks_id set but psk_identity is not set.\n" );
+            ret = 2;
+            goto usage;
+        }
+
+        if( strlen(opt.psk) != 0 )
+        {
+            mbedtls_printf( "psk_iks_id set but psk value is also set.\n" );
+            ret = 2;
+            goto usage;
+        }
+
+        if( opt.force_ciphersuite[0] <= 0 )
+        {
+            mbedtls_printf( "opaque PSKs are only supported in conjunction with forcing TLS 1.2 and a PSK-only ciphersuite through the 'force_ciphersuite' option.\n" );
+            ret = 2;
+            goto usage;
+        }
+    }
+#endif /* MBEDTLS_IOT_KEY_STORE_ENABLED */
+
 #endif /* MBEDTLS_KEY_EXCHANGE__SOME__PSK_ENABLED */
 
 #if defined(MBEDTLS_ECP_C)
@@ -1538,13 +1606,30 @@ int main( int argc, char *argv[] )
 #endif
 
 #if defined(MBEDTLS_KEY_EXCHANGE__SOME__PSK_ENABLED)
-    if( ( ret = mbedtls_ssl_conf_psk( &conf, psk, psk_len,
-                             (const unsigned char *) opt.psk_identity,
-                             strlen( opt.psk_identity ) ) ) != 0 )
+#if defined(MBEDTLS_IOT_KEY_STORE_ENABLED)
+    if( strlen(opt.psk_iks_id) != 0 )
     {
-        mbedtls_printf( " failed\n  ! mbedtls_ssl_conf_psk returned %d\n\n",
-                        ret );
-        goto exit;
+        if( ( ret = mbedtls_ssl_conf_psk_iks( &conf,
+                                  (const unsigned char *)opt.psk_iks_id,
+                                  (const unsigned char *)opt.psk_identity,
+                                  strlen( opt.psk_identity ) ) ) != 0 )
+        {
+            mbedtls_printf( " failed\n  ! mbedtls_ssl_conf_psk_iks returned %d\n\n",
+                            ret );
+            goto exit;
+        }
+    }
+    else
+#endif /* MBEDTLS_IOT_KEY_STORE_ENABLED */
+    {
+        if( ( ret = mbedtls_ssl_conf_psk( &conf, psk, psk_len,
+                                          (const unsigned char *) opt.psk_identity,
+                                          strlen( opt.psk_identity ) ) ) != 0 )
+        {
+            mbedtls_printf( " failed\n  ! mbedtls_ssl_conf_psk returned %d\n\n",
+                            ret );
+            goto exit;
+        }
     }
 #endif
 
