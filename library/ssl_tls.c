@@ -7616,9 +7616,8 @@ int mbedtls_ssl_conf_psk_iks( mbedtls_ssl_config *conf,
     ssl_conf_remove_psk( conf );
 
     /* Get the key reference. */
-    iks_KeyRef_t keyRef = iks_GetKey((const char*)psk_iks_id);
-
-    if (keyRef == NULL)
+    iks_KeyRef_t keyRef;
+    if (iks_GetKey((const char*)psk_iks_id, &keyRef) != IKS_OK)
     {
         return MBEDTLS_ERR_SSL_BAD_INPUT_DATA;
     }
