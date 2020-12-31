@@ -140,6 +140,32 @@ void mbedtls_net_init( mbedtls_net_context *ctx );
  */
 int mbedtls_net_connect( mbedtls_net_context *ctx, const char *host, const char *port, int proto );
 
+/* __SWISTART__*/
+#ifndef NO_SWI
+/**
+ * \brief   Initiate a connection with host:port, using the optional client address and given protocol.
+ *          mbedtls_net_connect() has been overloaded to support client binding.
+ *
+ * \param ctx               Socket to use
+ * \param host              Host to connect to
+ * \param port              Port to connect to
+ * \param client_addr_ptr   Pointer to client sockaddr_storage struct
+ * \param client_addr_len   Length of client_addr_ptr
+ * \param proto             Protocol: MBEDTLS_NET_PROTO_TCP or MBEDTLS_NET_PROTO_UDP
+ *
+ * \return     0 if successful, or one of:
+ *                 MBEDTLS_ERR_NET_SOCKET_FAILED,
+ *                 MBEDTLS_ERR_NET_UNKNOWN_HOST,
+ *                 MBEDTLS_ERR_NET_BIND_FAILED,
+ *                 MBEDTLS_ERR_NET_CONNECT_FAILED
+ *
+ * \note       Sets the socket in connected mode even with UDP.
+ */
+int mbedtls_net_connect_swi( mbedtls_net_context *ctx, const char *host, const char *port,
+                            void *client_addr_ptr, const size_t client_addr_len, int proto );
+#endif /* NO_SWI */
+/* __SWISTOP__ */
+
 /**
  * \brief          Create a receiving socket on bind_ip:port in the chosen
  *                 protocol. If bind_ip == NULL, all interfaces are bound.
@@ -178,6 +204,31 @@ int mbedtls_net_bind( mbedtls_net_context *ctx, const char *bind_ip, const char 
 int mbedtls_net_accept( mbedtls_net_context *bind_ctx,
                         mbedtls_net_context *client_ctx,
                         void *client_ip, size_t buf_size, size_t *ip_len );
+
+/* __SWISTART__*/
+#ifndef NO_SWI
+/**
+ * \brief           Accept a connection from a remote client.
+ *                  mbedtls_net_accept() modified to provide remote parameters in a struct
+ *                  sockaddr_storage. The full output of accept() is now copied to client_ip.
+ *
+ * \param bind_ctx    		Relevant socket
+ * \param client_ctx  		Will contain the connected client socket
+ * \param client_ip 		Struct sockaddr_storage remote parameters are copied to
+ * \param client_ip_size  	Size of client_ip
+ *
+ * \return          0 if successful, or
+ *                  MBEDTLS_ERR_NET_BAD_INPUT_DATA if input data is NULL, or
+ *                  MBEDTLS_ERR_NET_BUFFER_TOO_SMALL if ip_len is too small, or
+ *                  MBEDTLS_ERR_NET_ACCEPT_FAILED, or
+ *                  MBEDTLS_ERR_SSL_WANT_READ if bind_fd was set to
+ *                  non-blocking and accept() would block.
+ */
+int mbedtls_net_accept_swi( mbedtls_net_context *bind_ctx,
+                            mbedtls_net_context *client_ctx,
+                            void *client_ip, size_t *client_ip_len );
+#endif /* NO_SWI */
+/* __SWISTOP__ */
 
 /**
  * \brief          Check and wait for the context to be ready for read/write

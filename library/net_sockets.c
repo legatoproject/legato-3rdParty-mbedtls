@@ -218,6 +218,78 @@ int mbedtls_net_connect( mbedtls_net_context *ctx, const char *host,
     return( ret );
 }
 
+/* __SWISTART__*/
+#ifndef NO_SWI
+/*
+ * Initiate a connection with host:port, using the optional client address and given protocol.
+ *
+ * mbedtls_net_connect() has been overloaded to support client binding.
+ */
+int mbedtls_net_connect_swi( mbedtls_net_context *ctx, const char *host, const char *port,
+                            void *client_addr_ptr, const size_t client_addr_len, int proto )
+{
+    int ret;
+    struct addrinfo hints, *addr_list, *cur;
+    struct sockaddr_storage *client_addr = (struct sockaddr_storage *)client_addr_ptr;
+
+    if( ( ret = net_prepare() ) != 0 )
+        return( ret );
+
+    /* Do name resolution with both IPv6 and IPv4 */
+    memset( &hints, 0, sizeof( hints ) );
+    if(client_addr != NULL)
+    {
+        hints.ai_family = client_addr->ss_family == AF_INET ? AF_INET : AF_INET6;
+    }
+    else
+    {
+        hints.ai_family = AF_UNSPEC;
+    }
+    hints.ai_socktype = proto == MBEDTLS_NET_PROTO_UDP ? SOCK_DGRAM : SOCK_STREAM;
+    hints.ai_protocol = proto == MBEDTLS_NET_PROTO_UDP ? IPPROTO_UDP : IPPROTO_TCP;
+
+    if( getaddrinfo( host, port, &hints, &addr_list ) != 0 )
+        return( MBEDTLS_ERR_NET_UNKNOWN_HOST );
+
+    /* Try the sockaddrs until a connection succeeds */
+    ret = MBEDTLS_ERR_NET_UNKNOWN_HOST;
+    for( cur = addr_list; cur != NULL; cur = cur->ai_next )
+    {
+        ctx->fd = (int) socket( cur->ai_family, cur->ai_socktype,
+                            cur->ai_protocol );
+        if( ctx->fd < 0 )
+        {
+            ret = MBEDTLS_ERR_NET_SOCKET_FAILED;
+            continue;
+        }
+
+        if ( client_addr != NULL)
+        {
+            if( bind( ctx->fd, (struct sockaddr *)client_addr, client_addr_len ) != 0 )
+            {
+                close( ctx->fd );
+                freeaddrinfo( addr_list );
+                return( MBEDTLS_ERR_NET_BIND_FAILED );
+            }
+        }
+
+        if( connect( ctx->fd, cur->ai_addr, cur->ai_addrlen ) == 0 )
+        {
+            ret = 0;
+            break;
+        }
+
+        close( ctx->fd );
+        ret = MBEDTLS_ERR_NET_CONNECT_FAILED;
+    }
+
+    freeaddrinfo( addr_list );
+
+    return( ret );
+}
+#endif /* NO_SWI */
+/* __SWISTOP__ */
+
 /*
  * Create a listening socket on bind_ip:port
  */
@@ -334,6 +406,113 @@ static int net_would_block( const mbedtls_net_context *ctx )
     return( 0 );
 }
 #endif /* ( _WIN32 || _WIN32_WCE ) && !EFIX64 && !EFI32 */
+
+/* __SWISTART__*/
+#ifndef NO_SWI
+/*
+ * Accept a connection from a remote client.
+ *
+ * mbedtls_net_accept() has been modified to provide the remote address in sockaddr_storage format.
+ * The full output of accept() is now copied to client_ip.
+ *
+ */
+int mbedtls_net_accept_swi( mbedtls_net_context *bind_ctx,
+                            mbedtls_net_context *client_ctx,
+                            void *client_ip, size_t *client_ip_len )
+{
+    int ret;
+    int type;
+
+    struct sockaddr_in client_addr;
+
+    socklen_t n = (socklen_t) sizeof( client_addr );
+    socklen_t type_len = (socklen_t) sizeof( type );
+
+    if ( (bind_ctx == NULL) ||
+        (client_ctx == NULL) ||
+        (client_ip == NULL) ||
+        (client_ip_len == NULL) )
+    {
+        return (MBEDTLS_ERR_NET_BAD_INPUT_DATA);
+    }
+
+    /* Is this a TCP or UDP socket? */
+    if( getsockopt( bind_ctx->fd, SOL_SOCKET, SO_TYPE,
+                    (void *) &type, (socklen_t *) &type_len ) != 0 ||
+        ( type != SOCK_STREAM && type != SOCK_DGRAM ) )
+    {
+        return( MBEDTLS_ERR_NET_ACCEPT_FAILED );
+    }
+
+    if( type == SOCK_STREAM )
+    {
+        /* TCP: actual accept() */
+        ret = client_ctx->fd = (int) accept( bind_ctx->fd,
+                                             (struct sockaddr *) &client_addr, &n );
+    }
+    else
+    {
+        /* UDP: wait for a message, but keep it in the queue */
+        char buf[1] = { 0 };
+
+        ret = recvfrom( bind_ctx->fd, buf, sizeof( buf ), MSG_PEEK,
+                        (struct sockaddr *) &client_addr, &n );
+    }
+
+    if( ret < 0 )
+    {
+        if( net_would_block( bind_ctx ) != 0 )
+            return( MBEDTLS_ERR_SSL_WANT_READ );
+
+        return( MBEDTLS_ERR_NET_ACCEPT_FAILED );
+    }
+
+    /* UDP: hijack the listening socket to communicate with the client,
+     * then bind a new socket to accept new connections */
+    if( type != SOCK_STREAM )
+    {
+        struct sockaddr_in local_addr;
+        int one = 1;
+
+        if( connect( bind_ctx->fd, (struct sockaddr *) &client_addr, n ) != 0 )
+            return( MBEDTLS_ERR_NET_ACCEPT_FAILED );
+
+        client_ctx->fd = bind_ctx->fd;
+        bind_ctx->fd   = -1; /* In case we exit early */
+
+        n = sizeof( struct sockaddr_in );
+        if( getsockname( client_ctx->fd,
+                         (struct sockaddr *) &local_addr, &n ) != 0 ||
+            ( bind_ctx->fd = (int) socket( AF_INET,
+                                           SOCK_DGRAM, IPPROTO_UDP ) ) < 0 ||
+            setsockopt( bind_ctx->fd, SOL_SOCKET, SO_REUSEADDR,
+                        (const char *) &one, sizeof( one ) ) != 0 )
+        {
+            return( MBEDTLS_ERR_NET_SOCKET_FAILED );
+        }
+
+        if( bind( bind_ctx->fd, (struct sockaddr *) &local_addr, n ) != 0 )
+        {
+            return( MBEDTLS_ERR_NET_BIND_FAILED );
+        }
+    }
+
+    if( client_ip != NULL )
+    {
+        if (*client_ip_len >= sizeof(client_addr))
+        {
+            memcpy(client_ip, &client_addr, sizeof(client_addr));
+        }
+        else
+        {
+            return( MBEDTLS_ERR_NET_BUFFER_TOO_SMALL );
+        }
+    }
+
+    return( 0 );
+}
+#endif /* NO_SWI */
+/* __SWISTOP__ */
 
 /*
  * Accept a connection from a remote client
